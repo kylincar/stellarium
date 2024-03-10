@@ -30,6 +30,13 @@ class QOpenGLDebugLogger;
 class QOpenGLDebugMessage;
 #endif
 #include "VecMath.hpp"
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/videodev2.h>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/highgui.hpp>
 
 class StelGLWidget;
 class StelGraphicsScene;
@@ -281,6 +288,7 @@ signals:
 private slots:
 	// Do the actual screenshot generation in the main thread with this method.
 	void doScreenshot(void);
+	void sendScreenshot(void);
 
 	void fpsTimerUpdate();
 	void hideCursor();
@@ -355,6 +363,10 @@ private:
 #ifdef OPENGL_DEBUG_LOGGING
 	QOpenGLDebugLogger* glLogger;
 #endif
+
+	//opencv video publisher
+	int gVideoWriter;
+	cv::Size*	 gFrameSize;
 };
 
 

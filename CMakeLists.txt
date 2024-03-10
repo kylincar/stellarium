@@ -1030,6 +1030,14 @@ IF(DOXYGEN_FOUND)
      ADD_CUSTOM_TARGET(apidoc ${DOXYGEN_EXECUTABLE} ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR} COMMENT "Generate the doxygen documentation into the doc directory.")
 ENDIF()
 
+#### Add opencv ####
+# Find OpenCV package
+find_package(OpenCV REQUIRED)
+MESSAGE(STATUS "OpenCV Required.")
+
+# Include OpenCV headers
+include_directories(${OpenCV_INCLUDE_DIRS})
+
 ########### Top level include directories ###########
 # This will be used for all compilations in sub-directories
 INCLUDE_DIRECTORIES(
@@ -1043,6 +1051,7 @@ INCLUDE_DIRECTORIES(
       ${INTL_INCLUDE_DIR}
       ${CMAKE_BINARY_DIR}/src
 )
+
 
 ########### Subdirectories ###############
 ADD_SUBDIRECTORY( data )

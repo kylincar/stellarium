@@ -676,6 +676,34 @@ StelMainView::StelMainView(QSettings* settings)
 	}
 #endif
 
+	gFrameSize = new cv::Size(1936, 1096); // Size of the video frames
+	// gVideoWriter = new cv::VideoWriter("/dev/video0", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 30.0, *gFrameSize, true);
+
+	// if (!gVideoWriter->isOpened()) {
+	// 	qDebug() << "Could not open the output video file for write";
+    //     delete gVideoWriter;
+	// 	gVideoWriter = NULL;
+    // }
+
+	const char* device = "/dev/video0";
+    gVideoWriter = open(device, O_RDWR);
+    if (gVideoWriter == -1) {
+        qDebug() << "Could not open the output video file for write";
+    }
+	else{
+		// Set parameters of the virtual video device
+		struct v4l2_format vformat = {};
+		vformat.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+		vformat.fmt.pix.width = gFrameSize->width;
+		vformat.fmt.pix.height = gFrameSize->height;
+		vformat.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420; // Most compatible format for webcams
+		vformat.fmt.pix.field = V4L2_FIELD_NONE;
+		if (ioctl(gVideoWriter, VIDIOC_S_FMT, &vformat) == -1) {
+			qDebug() << "Setting Pixel Format";
+			::close(gVideoWriter);
+			gVideoWriter = -1;
+		}
+	}
 	QSurfaceFormat glFormat = getDesiredGLFormat(configuration);
 	glWidget = new StelGLWidget(glFormat, this);
 	setViewport(glWidget);
@@ -763,6 +791,17 @@ StelMainView::~StelMainView()
 	StelApp::deinitStatic();
 	delete guiItem;
 	guiItem=Q_NULLPTR;
+
+	delete gFrameSize;
+	if(gVideoWriter != -1){
+		::close(gVideoWriter);
+	}
+	// if(gVideoWriter != NULL){
+	// 	gVideoWriter->release();
+	// 	delete gVideoWriter;
+	// 	gVideoWriter = NULL;
+	// }
+	
 }
 
 QSurfaceFormat StelMainView::getDesiredGLFormat(QSettings* configuration)
@@ -1543,6 +1582,7 @@ void StelMainView::fpsTimerUpdate()
 	{
 		updateQueued = true;
 		QTimer::singleShot(0, glWidget, SLOT(update()));
+		emit sendScreenshot();
 	}
 }
 
@@ -1924,6 +1964,193 @@ void StelMainView::doScreenshot(void)
 	{
 		qWarning() << "WARNING failed to write screenshot to: " << QDir::toNativeSeparators(shotPath.filePath());
 	}
+
+	emit sendScreenshot();
+}
+
+void StelMainView::sendScreenshot(void)
+{
+	QFileInfo shotDir;
+	// Make a screenshot which may be larger than the current window. This is harder than you would think:
+	// fbObj the framebuffer governs size of the target image, that's the easy part, but it also has its limits.
+	// However, the GUI parts need to be placed properly,
+	// HiDPI screens interfere, and the viewing angle has to be maintained.
+	// First, image size:
+	glWidget->makeCurrent();
+	const auto screen = QOpenGLContext::currentContext()->screen();
+	const auto pixelRatio = screen->devicePixelRatio();
+	int physImgWidth  = std::lround(stelScene->width() * pixelRatio);
+	int physImgHeight = std::lround(stelScene->height() * pixelRatio);
+	bool nightModeWasEnabled=nightModeEffect->isEnabled();
+	nightModeEffect->setEnabled(false);
+	if (flagUseCustomScreenshotSize)
+	{
+		// Borrowed from Scenery3d renderer: determine maximum framebuffer size as minimum of texture, viewport and renderbuffer size
+		QOpenGLContext *context = QOpenGLContext::currentContext();
+		if (context)
+		{
+			context->functions()->initializeOpenGLFunctions();
+			//qDebug() << "initializeOpenGLFunctions()...";
+			// TODO: Investigate this further when GL memory issues should appear.
+			// Make sure we have enough free GPU memory!
+#ifndef NDEBUG
+#ifdef GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX
+			GLint freeGLmemory;
+			context->functions()->glGetIntegerv(GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX, &freeGLmemory);
+			qCDebug(mainview)<<"Free GPU memory:" << freeGLmemory << "kB -- we ask for " << customScreenshotWidth*customScreenshotHeight*8 / 1024 <<"kB";
+#endif
+#ifdef GL_RENDERBUFFER_FREE_MEMORY_ATI
+			GLint freeGLmemoryAMD[4];
+			context->functions()->glGetIntegerv(GL_RENDERBUFFER_FREE_MEMORY_ATI, freeGLmemoryAMD);
+			qCDebug(mainview)<<"Free GPU memory (AMD version):" << static_cast<uint>(freeGLmemoryAMD[1])/1024 << "+"
+					  << static_cast<uint>(freeGLmemoryAMD[3])/1024 << " of "
+					  << static_cast<uint>(freeGLmemoryAMD[0])/1024 << "+"
+					  << static_cast<uint>(freeGLmemoryAMD[2])/1024 << "kB -- we ask for "
+					  << customScreenshotWidth*customScreenshotHeight*8 / 1024 <<"kB";
+#endif
+#endif
+			GLint texSize,viewportSize[2],rbSize;
+			context->functions()->glGetIntegerv(GL_MAX_TEXTURE_SIZE, &texSize);
+			context->functions()->glGetIntegerv(GL_MAX_VIEWPORT_DIMS, viewportSize);
+			context->functions()->glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &rbSize);
+			qCDebug(mainview)<<"Maximum texture size:"<<texSize;
+			qCDebug(mainview)<<"Maximum viewport dims:"<<viewportSize[0]<<viewportSize[1];
+			qCDebug(mainview)<<"Maximum renderbuffer size:"<<rbSize;
+			int maximumFramebufferSize = qMin(texSize,qMin(rbSize,qMin(viewportSize[0],viewportSize[1])));
+			qCDebug(mainview)<<"Maximum framebuffer size:"<<maximumFramebufferSize;
+
+			physImgWidth =qMin(maximumFramebufferSize, customScreenshotWidth);
+			physImgHeight=qMin(maximumFramebufferSize, customScreenshotHeight);
+		}
+		else
+		{
+			qCWarning(mainview) << "No GL context for screenshot! Aborting.";
+			return;
+		}
+	}
+	// The texture format depends on used GL version. RGB is fine on OpenGL. on GLES, we must use RGBA and circumvent problems with a few more steps.
+	bool isGLES=(QOpenGLContext::currentContext()->format().renderableType() == QSurfaceFormat::OpenGLES);
+
+	QOpenGLFramebufferObjectFormat fbFormat;
+	fbFormat.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
+	fbFormat.setInternalTextureFormat(isGLES ? GL_RGBA : GL_RGB); // try to avoid transparent background!
+	QOpenGLFramebufferObject * fbObj = new QOpenGLFramebufferObject(physImgWidth, physImgHeight, fbFormat);
+	fbObj->bind();
+	// Now the painter has to be convinced to paint to the potentially larger image frame.
+	QOpenGLPaintDevice fbObjPaintDev(physImgWidth, physImgHeight);
+
+	// It seems the projector has its own knowledge about image size. We must adjust fov and image size, but reset afterwards.
+	StelCore *core=StelApp::getInstance().getCore();
+	StelProjector::StelProjectorParams pParams=core->getCurrentStelProjectorParams();
+	StelProjector::StelProjectorParams sParams=pParams;
+	//qCDebug(mainview) << "Screenshot Viewport: x" << pParams.viewportXywh[0] << "/y" << pParams.viewportXywh[1] << "/w" << pParams.viewportXywh[2] << "/h" << pParams.viewportXywh[3];
+	const auto virtImgWidth  = physImgWidth  / pixelRatio;
+	const auto virtImgHeight = physImgHeight / pixelRatio;
+	sParams.viewportXywh[2] = virtImgWidth;
+	sParams.viewportXywh[3] = virtImgHeight;
+
+	// Configure a helper value to allow some modules to tweak their output sizes. Currently used by StarMgr, maybe solve font issues?
+	customScreenshotMagnification=static_cast<float>(virtImgHeight)/static_cast<float>(screen->geometry().height());
+	sParams.viewportCenter.set(0.0+(0.5+pParams.viewportCenterOffset.v[0])*virtImgWidth,
+							   0.0+(0.5+pParams.viewportCenterOffset.v[1])*virtImgHeight);
+	sParams.viewportFovDiameter = qMin(virtImgWidth,virtImgHeight);
+	core->setCurrentStelProjectorParams(sParams);
+
+	QPainter painter;
+	painter.begin(&fbObjPaintDev);
+	// next line was above begin(), but caused a complaint. Maybe use after begin()?
+	painter.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
+	stelScene->setSceneRect(0, 0, virtImgWidth, virtImgHeight);
+
+	// push the button bars back to the sides where they belong, and fix root item clipping its children.
+	dynamic_cast<StelGui*>(gui)->getSkyGui()->setGeometry(0, 0, virtImgWidth, virtImgHeight);
+	rootItem->setSize(QSize(virtImgWidth, virtImgHeight));
+	dynamic_cast<StelGui*>(gui)->forceRefreshGui(); // refresh bar position.
+
+	stelScene->render(&painter, QRectF(), QRectF(0,0,virtImgWidth,virtImgHeight) , Qt::KeepAspectRatio);
+	painter.end();
+
+	QImage im;
+	if (isGLES)
+	{
+		// We have RGBA texture with possibly empty spots when atmosphere was off.
+		// See toImage() help entry why to create wrapper here.
+		QImage fboImage(fbObj->toImage());
+		//qDebug() << "FBOimage format:" << fboImage.format(); // returns Format_RGBA8888_Premultiplied
+		QImage im2(fboImage.constBits(), fboImage.width(), fboImage.height(), QImage::Format_RGBX8888);
+		im=im2.copy();
+	}
+	else
+		im=fbObj->toImage();
+	fbObj->release();
+	delete fbObj;
+	// reset viewport and GUI
+	core->setCurrentStelProjectorParams(pParams);
+	customScreenshotMagnification=1.0f;
+	nightModeEffect->setEnabled(nightModeWasEnabled);
+	stelScene->setSceneRect(0, 0, pParams.viewportXywh[2], pParams.viewportXywh[3]);
+	rootItem->setSize(QSize(pParams.viewportXywh[2], pParams.viewportXywh[3]));
+	StelGui* stelGui = dynamic_cast<StelGui*>(gui);
+	if (stelGui)
+	{
+		stelGui->getSkyGui()->setGeometry(0, 0, pParams.viewportXywh[2], pParams.viewportXywh[3]);
+		stelGui->forceRefreshGui();
+	}
+
+	if (nightModeWasEnabled)
+	{
+		for (int row=0; row<im.height(); ++row)
+			for (int col=0; col<im.width(); ++col)
+			{
+				QRgb rgb=im.pixel(col, row);
+				int gray=qGray(rgb);
+				im.setPixel(col, row, qRgb(gray, 0, 0));
+			}
+	}
+	if (flagInvertScreenShotColors)
+		im.invertPixels();
+
+	// Set preferred image resolution (for some printing workflows)
+	im.setDotsPerMeterX(qRound(screenshotDpi*100./2.54));
+	im.setDotsPerMeterY(qRound(screenshotDpi*100./2.54));
+
+	// // To get the format of the QImage
+	// QImage::Format imageFormat = im.format();
+
+	// // To output the format for debugging purposes, you could use qDebug()
+	// qDebug() << "The format of the image is:" << imageFormat;
+
+	// // If you want to convert the format enum to a human-readable string, you might do something like this:
+	// QString formatName;
+	// switch (imageFormat) {
+	// 	case QImage::Format_Invalid: formatName = "Invalid"; break;
+	// 	case QImage::Format_Mono: formatName = "Mono"; break;
+	// 	case QImage::Format_MonoLSB: formatName = "MonoLSB"; break;
+	// 	case QImage::Format_Indexed8: formatName = "Indexed8"; break;
+	// 	case QImage::Format_RGB32: formatName = "RGB32"; break;
+	// 	case QImage::Format_ARGB32: formatName = "ARGB32"; break;
+	// 	// ... handle other formats ...
+	// 	default: formatName = "Unknown"; break;
+	// }
+
+	// qDebug() << "The readable format of the image is:" << formatName;
+
+    cv::Mat opencvMat = cv::Mat(im.height(), im.width(),
+                           CV_8UC4,
+                           const_cast<uchar*>(im.bits()),
+                           static_cast<size_t>(im.bytesPerLine())).clone();
+
+	cv::Mat finalMat;
+	cv::cvtColor(opencvMat, finalMat, cv::COLOR_BGRA2BGR);
+	cv::resize(finalMat, finalMat, *gFrameSize, 0, 0, cv::INTER_LINEAR);
+	cv::Mat frameYUV;
+    cv::cvtColor(finalMat, frameYUV, cv::COLOR_BGR2YUV_I420);
+	if(gVideoWriter != -1){
+        // Write the frame to the device
+        write(gVideoWriter, frameYUV.data, frameYUV.total() * frameYUV.elemSize());
+	}
+	//gVideoWriter->write(finalMat);
+	//cv::imwrite("/home/liang/opencv.jpg", finalMat);
 }
 
 QPoint StelMainView::getMousePos() const

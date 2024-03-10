@@ -9,6 +9,7 @@ IF(ENABLE_SPOUT)
 	 )
 ENDIF()
 
+
 SET(stellarium_lib_SRCS
      core/BlueNoiseTriangleRemapped.hpp
      core/StelSRGB.hpp
@@ -531,12 +532,12 @@ IF(GENERATE_STELMAINLIB)
      # WIN32 creates a windows app without console, no effect on non-win platforms
      ADD_EXECUTABLE(stellarium WIN32 ${stellarium_exe_SRCS})
      #stelMain should be after the plug-ins, otherwise the build crashes
-     TARGET_LINK_LIBRARIES(stellarium stelMain ${winMMLib})
+     TARGET_LINK_LIBRARIES(stellarium stelMain ${winMMLib} ${OpenCV_LIBS})
 ELSE()
      ADD_LIBRARY(stelMain STATIC ${stellarium_lib_SRCS} ${stellarium_RES_CXX})
      TARGET_LINK_LIBRARIES(stelMain ${STELMAIN_DEPS})
      ADD_EXECUTABLE(stellarium WIN32 ${stellarium_exe_SRCS})
-     TARGET_LINK_LIBRARIES(stellarium ${winMMLib} ${STELMAIN_DEPS} stelMain)
+     TARGET_LINK_LIBRARIES(stellarium ${winMMLib} ${STELMAIN_DEPS} stelMain ${OpenCV_LIBS})
 
      IF(APPLE)
 	  SET_TARGET_PROPERTIES(stellarium PROPERTIES LINK_FLAGS " -framework Cocoa -framework OpenGL")
